@@ -78,6 +78,20 @@ def split_vendors(df):
         "spo2_pct": b["spo2_pct"],
     }).reset_index(drop=True)
     return raw_a, raw_b
+
+def simulate_sessions(users, days=DAYS, seed=8):
+    """Therapy sessions: every 2-3 days from the therapy start day."""
+    rng = np.random.default_rng(seed)
+    rows = []
+    for uid in users:
+        machine = str(rng.choice(["CRYO-01", "CRYO-02"]))   # each user uses one machine
+        d = THERAPY_START_DAY
+        while d < days:
+            rows.append({"user_id": uid,
+                         "date": START + pd.Timedelta(days=d),
+                         "machine_id": machine})
+            d += int(rng.choice([2, 3]))
+    return pd.DataFrame(rows)
   
 
 if __name__ == "__main__":
@@ -94,6 +108,11 @@ if __name__ == "__main__":
     Path("data/raw").mkdir(parents=True, exist_ok=True)
     raw_a.to_csv("data/raw/watch_vendor_a.csv", index=False)
     raw_b.to_csv("data/raw/watch_vendor_b.csv", index=False)
+    sessions = simulate_sessions(sorted(watch["user_id"].unique()))
+    sessions.to_csv("data/raw/sessions.csv", index=False)
+    print(sessions.groupby("user_id").agg(
+        n_sessions=("date", "size"), first=("date", "min"), machine=("machine_id", "first")
+    ))
     
 
 

@@ -95,7 +95,14 @@ def load_clean_machines(path="data/raw/machines.csv"):
     machines = pd.read_csv(path, parse_dates=["timestamp"])
     df, q = clean_table(machines, MACHINE_METRICS, ["machine_id", "timestamp"])
     df, q = fill_short_gaps(df, q, MACHINE_METRICS, "machine_id")
-    return df    
+    return df  
+
+def load_clean_watch(a="data/raw/watch_vendor_a.csv", b="data/raw/watch_vendor_b.csv"):
+    """Read both vendors' raw files and return one cleaned watch table."""
+    watch = unify_watch(pd.read_csv(a), pd.read_csv(b))
+    df, q = clean_table(watch, WATCH_METRICS, ["user_id", "date"])
+    df, q = fill_short_gaps(df, q, WATCH_METRICS, "user_id")
+    return df  
 
 if __name__ == "__main__":
     # watch

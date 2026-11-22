@@ -1,8 +1,8 @@
 from sklearn.ensemble import IsolationForest
+from scipy import stats
 import numpy as np
 import pandas as pd
-
-from teleomy.clean import MACHINE_METRICS, load_clean_machines
+from teleomy.clean import MACHINE_METRICS, load_clean_machines, load_clean_watch
 
 
 def add_rolling(df, window=12):
@@ -64,6 +64,59 @@ def evaluate(out, train_end=TRAIN_END, alert_threshold=0.2):
         "recall": round(tp / (tp + fn), 3) if tp + fn else 0.0,
         "first_alert_day": first_alert,
     }
+    
+TREND_METRICS = ["hrv_ms", "resting_hr", "sleep_hours"]
+
+
+def baseline_vs_recent(watch, sessions, metrics=TREND_METRICS,
+                       baseline_days=14, recent_days=14):
+    """Per user and metric: mean in the 14 days before the first session
+    versus the mean over the last 14 days of data."""
+    first_session = sessions.groupby("user_id")["date"].min()
+    rows = []
+    for uid, start in first_session.items():
+        u = watch[watch["user_id"] == uid]
+        base = u[(u["date"] < start) & (u["date"] >= start - pd.Timedelta(days=baseline_days))]
+        recent = u[u["date"] > u["date"].max() - pd.Timedelta(days=recent_days)]
+        for metric in metrics:
+            b, r = base[metric].mean(), recent[metric].mean()   # mean() skips empty values
+            rows.append({
+                "user_id": uid, "metric": metric,
+                "baseline_mean": round(b, 2), "recent_mean": round(r, 2),
+                "pct_change": round(100 * (r - b) / b, 1),
+            })
+    return pd.DataFrame(rows)    
+
+FAVOURABLE = {"hrv_ms": 1, "resting_hr": -1, "sleep_hours": 1}   # +1: higher is better
+
+
+def trend_slopes(watch, sessions, metrics=TREND_METRICS):
+    """Linear trend of each metric over the days since each user's first session."""
+    first_session = sessions.groupby("user_id")["date"].min()
+    rows = []
+    for uid, start in first_session.items():
+        post = watch[(watch["user_id"] == uid) & (watch["date"] >= start)]
+        for metric in metrics:
+            p = post[["date", metric]].dropna()
+            res = stats.linregress((p["date"] - start).dt.days, p[metric])
+            rows.append({
+                "user_id": uid, "metric": metric,
+                "slope_per_week": round(res.slope * 7, 3),
+                "p_value": round(res.pvalue, 4),
+                "n_days": len(p),
+            })
+    return pd.DataFrame(rows)
+
+
+def recovery_trends(watch, sessions):
+    """Baseline-vs-recent plus slope, with a plain-language reading."""
+    table = baseline_vs_recent(watch, sessions).merge(
+        trend_slopes(watch, sessions), on=["user_id", "metric"]
+    )
+    direction = table["metric"].map(FAVOURABLE)
+    favourable = (np.sign(table["pct_change"]) == direction) & (table["p_value"] < 0.05)
+    table["reading"] = np.where(favourable, "favourable trend", "no clear change")
+    return table
 
 if __name__ == "__main__":
     df = add_rolling(load_clean_machines())
@@ -73,4 +126,8 @@ if __name__ == "__main__":
         print(key, ":", value)
 
     rate = daily_anomaly_rate(out)
-    print(rate[rate["machine_id"] == "CRYO-02"].tail(14).round(2).to_string(index=False))
+    cry2 = rate[rate["machine_id"] == "CRYO-02"].tail(14)
+    print(cry2.assign(anomaly_rate=cry2["anomaly_rate"].round(2)).to_string(index=False))
+    watch = load_clean_watch()
+    sessions = pd.read_csv("data/raw/sessions.csv", parse_dates=["date"])
+    print(recovery_trends(watch, sessions).to_string(index=False))
