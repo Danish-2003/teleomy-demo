@@ -102,35 +102,66 @@ def load_clean_watch(a="data/raw/watch_vendor_a.csv", b="data/raw/watch_vendor_b
     watch = unify_watch(pd.read_csv(a), pd.read_csv(b))
     df, q = clean_table(watch, WATCH_METRICS, ["user_id", "date"])
     df, q = fill_short_gaps(df, q, WATCH_METRICS, "user_id")
-    return df  
+    return df
+
+QUALITY_FLAGS = ["valid", "imputed_missing", "imputed_invalid", "missing", "invalid"]
+
+
+def quality_report(raw_dir="data/raw"):
+    """Counts of each quality flag per metric, plus duplicate rows dropped."""
+    watch = unify_watch(
+        pd.read_csv(f"{raw_dir}/watch_vendor_a.csv"),
+        pd.read_csv(f"{raw_dir}/watch_vendor_b.csv"),
+    )
+    machines = pd.read_csv(f"{raw_dir}/machines.csv", parse_dates=["timestamp"])
+
+    frames, dupes = [], {}
+    streams = [
+        ("watch", watch, WATCH_METRICS, ["user_id", "date"], "user_id"),
+        ("machine", machines, MACHINE_METRICS, ["machine_id", "timestamp"], "machine_id"),
+    ]
+    for stream, df, metrics, keys, group_col in streams:
+        clean, quality = clean_table(df, metrics, keys)
+        _, quality = fill_short_gaps(clean, quality, metrics, group_col)
+        dupes[stream] = len(df) - len(clean)
+        counts = quality.apply(pd.Series.value_counts).fillna(0).astype(int).T
+        counts.insert(0, "stream", stream)
+        frames.append(counts.rename_axis("metric").reset_index())
+
+    report = pd.concat(frames, ignore_index=True)
+    for col in QUALITY_FLAGS:
+        if col not in report.columns:
+            report[col] = 0
+    report[QUALITY_FLAGS] = report[QUALITY_FLAGS].fillna(0).astype(int)
+    return report[["stream", "metric"] + QUALITY_FLAGS], dupes
+
+
+def build_feed(raw_dir="data/raw"):
+    """Cleaned watch + machine data in the standard record schema."""
+    watch = unify_watch(
+        pd.read_csv(f"{raw_dir}/watch_vendor_a.csv"),
+        pd.read_csv(f"{raw_dir}/watch_vendor_b.csv"),
+    )
+    w, wq = clean_table(watch, WATCH_METRICS, ["user_id", "date"])
+    w, wq = fill_short_gaps(w, wq, WATCH_METRICS, "user_id")
+    watch_long = to_long(
+        w, wq, WATCH_METRICS,
+        timestamp=w["date"].dt.strftime("%Y-%m-%dT00:00:00Z"),
+        device_id=w["source"], source="watch", user_id=w["user_id"],
+    )
+
+    machines = pd.read_csv(f"{raw_dir}/machines.csv", parse_dates=["timestamp"])
+    m, mq = clean_table(machines, MACHINE_METRICS, ["machine_id", "timestamp"])
+    m, mq = fill_short_gaps(m, mq, MACHINE_METRICS, "machine_id")
+    machine_long = to_long(
+        m, mq, MACHINE_METRICS,
+        timestamp=m["timestamp"].dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        device_id=m["machine_id"], source="machine",
+    )
+    return pd.concat([watch_long, machine_long], ignore_index=True)  
 
 if __name__ == "__main__":
-    # watch
-    raw_a = pd.read_csv("data/raw/watch_vendor_a.csv")
-    raw_b = pd.read_csv("data/raw/watch_vendor_b.csv")
-    watch = unify_watch(raw_a, raw_b)
-    w_clean, w_q = clean_table(watch, WATCH_METRICS, ["user_id", "date"])
-    w_filled, w_q2 = fill_short_gaps(w_clean, w_q, WATCH_METRICS, "user_id")
-    watch_long = to_long(
-        w_filled, w_q2, WATCH_METRICS,
-        timestamp=w_filled["date"].dt.strftime("%Y-%m-%dT00:00:00Z"),
-        device_id=w_filled["source"], source="watch", user_id=w_filled["user_id"],
-    )
-
-    # machines
-    machines = pd.read_csv("data/raw/machines.csv", parse_dates=["timestamp"])
-    m_clean, m_q = clean_table(machines, MACHINE_METRICS, ["machine_id", "timestamp"])
-    m_filled, m_q2 = fill_short_gaps(m_clean, m_q, MACHINE_METRICS, "machine_id")
-    machine_long = to_long(
-        m_filled, m_q2, MACHINE_METRICS,
-        timestamp=m_filled["timestamp"].dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
-        device_id=m_filled["machine_id"], source="machine",
-    )
-
-    # one feed
-    feed = pd.concat([watch_long, machine_long], ignore_index=True)
+    feed = build_feed()
     feed.to_json("data/telemetry.jsonl", orient="records", lines=True)
-
-    print(len(watch_long), "+", len(machine_long), "=", len(feed), "records")
+    print(len(feed), "records")
     print(feed.groupby(["source", "quality"]).size().to_string())
-    print(machine_long.head(1).to_json(orient="records", indent=2))
