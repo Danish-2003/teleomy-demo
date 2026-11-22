@@ -89,6 +89,13 @@ def to_long(df, quality, metrics, timestamp, device_id, source, user_id=None):
     long["value"] = long["value"].round(3)
     return long[["user_id", "source", "device_id", "timestamp",
                  "metric", "value", "unit", "quality"]]
+    
+def load_clean_machines(path="data/raw/machines.csv"):
+    """Read raw machine data and return it cleaned, with short gaps filled."""
+    machines = pd.read_csv(path, parse_dates=["timestamp"])
+    df, q = clean_table(machines, MACHINE_METRICS, ["machine_id", "timestamp"])
+    df, q = fill_short_gaps(df, q, MACHINE_METRICS, "machine_id")
+    return df    
 
 if __name__ == "__main__":
     # watch
