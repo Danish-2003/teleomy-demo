@@ -29,21 +29,21 @@ VALID_RANGES = {              # (lowest plausible, highest plausible)
     "hrv_ms": (5, 200),
     "sleep_hours": (0, 14),
     "spo2_pct": (85, 100),
+    "chamber_temp_c": (-170, 40),
+    "compressor_current_a": (0, 40),
+    "vibration_mm_s": (0, 20),
 }
-WATCH_METRICS = list(VALID_RANGES)
+WATCH_METRICS = ["resting_hr", "hrv_ms", "sleep_hours", "spo2_pct"]
+MACHINE_METRICS = ["chamber_temp_c", "compressor_current_a", "vibration_mm_s"]
 
 
-def clean_watch(df):
+def clean_table(df, metrics, keys):
     """Drop duplicates, blank out impossible values, flag every value."""
-    # one row per user per day, even if a duplicate's values differ slightly
-    df = (
-        df.drop_duplicates(subset=["user_id", "date"])
-        .sort_values(["user_id", "date"])
-        .reset_index(drop=True)
-    )
-    quality = pd.DataFrame("valid", index=df.index, columns=WATCH_METRICS)
+    df = df.drop_duplicates(subset=keys).sort_values(keys).reset_index(drop=True)
+    quality = pd.DataFrame("valid", index=df.index, columns=metrics)
 
-    for metric, (lo, hi) in VALID_RANGES.items():
+    for metric in metrics:
+        lo, hi = VALID_RANGES[metric]
         missing = df[metric].isna()
         invalid = df[metric].notna() & ~df[metric].between(lo, hi)
         df.loc[invalid, metric] = np.nan
@@ -52,56 +52,71 @@ def clean_watch(df):
     return df, quality
 
 
-def fill_short_gaps(df, quality, limit=2):
-    """Linearly fill short gaps inside each user's series and update the flags."""
+def fill_short_gaps(df, quality, metrics, group_col, limit=2):
+    """Linearly fill short gaps inside each group's series and update the flags."""
     df, quality = df.copy(), quality.copy()
-    for metric in WATCH_METRICS:
+    for metric in metrics:
         was_empty = df[metric].isna()
-        df[metric] = df.groupby("user_id")[metric].transform(
+        df[metric] = df.groupby(group_col)[metric].transform(
             lambda s: s.interpolate(limit=limit, limit_area="inside")
         )
         filled = was_empty & df[metric].notna()
-        # keep WHY it was empty, so sensor glitches stay visible
         quality.loc[filled & (quality[metric] == "invalid"), metric] = "imputed_invalid"
         quality.loc[filled & (quality[metric] == "missing"), metric] = "imputed_missing"
     return df, quality
 
 
-UNITS = {"resting_hr": "bpm", "hrv_ms": "ms", "sleep_hours": "h", "spo2_pct": "%"}
+UNITS = {
+    "resting_hr": "bpm", "hrv_ms": "ms", "sleep_hours": "h", "spo2_pct": "%",
+    "chamber_temp_c": "C", "compressor_current_a": "A", "vibration_mm_s": "mm/s",
+}
 
 
-def to_long_watch(df, quality):
-    """One row per (user, day, metric), in the standard record schema."""
-    long = df.melt(
-        id_vars=["user_id", "date", "source"],
-        value_vars=WATCH_METRICS,
-        var_name="metric",
-        value_name="value",
-    )
-    # melt the flags the same way; same row and column order, so they line up
-    long["quality"] = quality[WATCH_METRICS].melt(value_name="quality")["quality"].values
+def to_long(df, quality, metrics, timestamp, device_id, source, user_id=None):
+    """Standard record schema: one row per (entity, timestamp, metric).
 
-    long["device_id"] = long["source"]          # which vendor/device sent it
-    long["source"] = "watch"                    # what kind of source it is
-    long["timestamp"] = long["date"].dt.strftime("%Y-%m-%dT00:00:00Z")
+    timestamp, device_id and user_id are Series aligned with df's rows.
+    """
+    k = len(metrics)
+    long = df[metrics].melt(var_name="metric", value_name="value")
+    # melt stacks column by column, so the per-row fields repeat k times in order
+    long["quality"] = quality[metrics].melt(value_name="quality")["quality"].values
+    long["timestamp"] = np.tile(timestamp.to_numpy(), k)
+    long["device_id"] = np.tile(device_id.to_numpy(), k)
+    long["user_id"] = np.tile(user_id.to_numpy(), k) if user_id is not None else None
+    long["source"] = source
     long["unit"] = long["metric"].map(UNITS)
     long["value"] = long["value"].round(3)
-    return long[["user_id", "source", "device_id", "timestamp", "metric", "value", "unit", "quality"]]
-
+    return long[["user_id", "source", "device_id", "timestamp",
+                 "metric", "value", "unit", "quality"]]
 
 if __name__ == "__main__":
-    import json
-
+    # watch
     raw_a = pd.read_csv("data/raw/watch_vendor_a.csv")
     raw_b = pd.read_csv("data/raw/watch_vendor_b.csv")
     watch = unify_watch(raw_a, raw_b)
-    clean, quality = clean_watch(watch)
-    filled, quality2 = fill_short_gaps(clean, quality)
+    w_clean, w_q = clean_table(watch, WATCH_METRICS, ["user_id", "date"])
+    w_filled, w_q2 = fill_short_gaps(w_clean, w_q, WATCH_METRICS, "user_id")
+    watch_long = to_long(
+        w_filled, w_q2, WATCH_METRICS,
+        timestamp=w_filled["date"].dt.strftime("%Y-%m-%dT00:00:00Z"),
+        device_id=w_filled["source"], source="watch", user_id=w_filled["user_id"],
+    )
 
-    long = to_long_watch(filled, quality2)
-    print(len(long), "records")
-    print(long["quality"].value_counts().to_string())
+    # machines
+    machines = pd.read_csv("data/raw/machines.csv", parse_dates=["timestamp"])
+    m_clean, m_q = clean_table(machines, MACHINE_METRICS, ["machine_id", "timestamp"])
+    m_filled, m_q2 = fill_short_gaps(m_clean, m_q, MACHINE_METRICS, "machine_id")
+    machine_long = to_long(
+        m_filled, m_q2, MACHINE_METRICS,
+        timestamp=m_filled["timestamp"].dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        device_id=m_filled["machine_id"], source="machine",
+    )
 
-    long.to_json("data/telemetry_watch.jsonl", orient="records", lines=True)
-    with open("data/telemetry_watch.jsonl") as f:
-        print(json.dumps(json.loads(f.readline()), indent=2))
+    # one feed
+    feed = pd.concat([watch_long, machine_long], ignore_index=True)
+    feed.to_json("data/telemetry.jsonl", orient="records", lines=True)
+
+    print(len(watch_long), "+", len(machine_long), "=", len(feed), "records")
+    print(feed.groupby(["source", "quality"]).size().to_string())
+    print(machine_long.head(1).to_json(orient="records", indent=2))
