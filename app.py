@@ -78,10 +78,21 @@ with tab_recovery:
     uw = watch[watch["user_id"] == user].set_index("date").sort_index()
     start = sessions[sessions["user_id"] == user]["date"].min()
     st.write(f"First therapy session: **{start.date()}**")
-    st.line_chart(pd.DataFrame({
+    plot = pd.DataFrame({
         metric: uw[metric],
         "7-day mean": uw[metric].rolling(7, min_periods=3).mean(),
-    }))
+    }).reset_index().melt("date", var_name="series", value_name="value")
+
+    chart = (
+        alt.Chart(plot)
+        .mark_line()
+        .encode(
+            x=alt.X("date:T", title="Day"),
+            y=alt.Y("value:Q", scale=alt.Scale(zero=False), title=metric),
+            color=alt.Color("series:N", title=None),
+        )
+    )
+    st.altair_chart(chart)
 
     st.subheader("Trend summary (baseline = 14 days before first session)")
     st.dataframe(trends[trends["user_id"] == user].drop(columns="user_id"), hide_index=True)
