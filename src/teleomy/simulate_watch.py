@@ -50,18 +50,63 @@ def add_watch_mess(df,rng):
     df = pd.concat([df, df.sample(8, random_state=1)], ignore_index=True)
     return df    
 
+
+def split_vendors(df):
+    """Turn one clean-looking table into two vendors' different raw formats."""
+    df = df.copy()
+    df["date"] = pd.to_datetime(df["date"])
+    users = sorted(df["user_id"].unique())
+    is_a = df["user_id"].isin(users[::2])           
+
+    a = df[is_a]
+    raw_a = pd.DataFrame({
+        "uid": a["user_id"],
+        "date": a["date"].dt.strftime("%Y-%m-%d"),   
+        "rhr": a["resting_hr"],
+        "hrv_ms": a["hrv_ms"],
+        "sleep_h": a["sleep_hours"],                
+        "spo2": a["spo2_pct"],
+    }).reset_index(drop=True)
+
+    b = df[~is_a]
+    raw_b = pd.DataFrame({
+        "user": b["user_id"],
+        "day": b["date"].dt.strftime("%d/%m/%Y"),    
+        "resting_hr": b["resting_hr"],
+        "hrv": b["hrv_ms"],
+        "sleep_minutes": b["sleep_hours"] * 60,     
+        "spo2_pct": b["spo2_pct"],
+    }).reset_index(drop=True)
+    return raw_a, raw_b
   
 
 if __name__ == "__main__":
-    
-    rng = np.random.default_rng(99) 
-    watch = add_watch_mess(simulate_watch_users(), rng)
+    from pathlib import Path
 
-    print(watch.shape)
-    print("missing:\n", watch[WATCH_METRICS].isna().sum().to_string())
-    print("duplicates:", watch.duplicated().sum())
-    print("resting_hr > 200:", (watch["resting_hr"] > 200).sum())
-    print("hrv_ms < 0:", (watch["hrv_ms"] < 0).sum())
+    rng = np.random.default_rng(99)
+    watch = add_watch_mess(simulate_watch_users(), rng)
+    raw_a, raw_b = split_vendors(watch)
+
+    print(len(raw_a), len(raw_b), "total:", len(raw_a) + len(raw_b))
+    print(raw_a.head(3).to_string())
+    print(raw_b.head(3).to_string())
+
+    Path("data/raw").mkdir(parents=True, exist_ok=True)
+    raw_a.to_csv("data/raw/watch_vendor_a.csv", index=False)
+    raw_b.to_csv("data/raw/watch_vendor_b.csv", index=False)
+    
+
+
+
+
+    # rng = np.random.default_rng(99) 
+    # watch = add_watch_mess(simulate_watch_users(), rng)
+
+    # print(watch.shape)
+    # print("missing:\n", watch[WATCH_METRICS].isna().sum().to_string())
+    # print("duplicates:", watch.duplicated().sum())
+    # print("resting_hr > 200:", (watch["resting_hr"] > 200).sum())
+    # print("hrv_ms < 0:", (watch["hrv_ms"] < 0).sum())
     
     
     
